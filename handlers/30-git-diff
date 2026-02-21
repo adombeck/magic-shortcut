@@ -1,0 +1,30 @@
+#!/bin/sh
+# Handle git diff paths in clipboard
+
+clipboard=$(cat)
+
+# Match lines starting with a/ or b/ and extract the path
+result=$(echo "$clipboard" | sed -n 's/^[ab]\/\(.*\)/\1/p')
+
+if [ -z "$result" ]; then
+    # Not a git diff path, exit without handling
+    exit 0
+fi
+
+if [ ! -f "$result" ]; then
+    # The extracted path does not exist as a file, exit without handling
+    exit 0
+fi
+
+jq -n \
+    --arg path "$result" \
+    '{
+        handled: true,
+        message: {
+            title: "Opening Git Diff",
+            body: $path
+        },
+        action: "open_file",
+        path: $path
+    }'
+exit 0

@@ -1,0 +1,122 @@
+#!/bin/sh
+# Handle file paths in clipboard (with optional line numbers)
+
+is_valid_number() {
+    echo "$1" | grep -qE '^[0-9]+$'
+}
+
+parse_colon_format() {
+    # Parse "path/to/file:line_number" format
+    text="$1"
+    potential_path="${text%%:*}"
+    rest="${text#*:}"
+    rest="${rest%%:*}"  # Remove trailing colon if present
+
+    if ! [ -f "$potential_path" ]; then
+        return 1
+    fi
+
+    if [ -n "$rest" ] && is_valid_number "$rest"; then
+        echo "$potential_path"
+        echo "$rest"
+        return 0
+    fi
+
+    return 1
+}
+
+parse_github_format() {
+    # Parse "path/to/file#Lline_number" format
+    text="$1"
+    potential_path="${text%%#L*}"
+    rest="${text#*#L}"
+
+    if ! [ -f "$potential_path" ]; then
+        return 1
+    fi
+
+    if [ -n "$rest" ] && is_valid_number "$rest"; then
+        echo "$potential_path"
+        echo "$rest"
+        return 0
+    fi
+
+    return 1
+}
+
+extract_path_and_line() {
+    text="$1"
+
+    # Check if it's an existing file
+    if [ -e "$text" ]; then
+        echo "$text"
+        echo ""
+        return
+    fi
+
+    # Try colon format
+    if echo "$text" | grep -q ':'; then
+        if parse_colon_format "$text"; then
+            return
+        fi
+    fi
+
+    # Try GitHub format
+    if echo "$text" | grep -q '#L'; then
+        if parse_github_format "$text"; then
+            return
+        fi
+    fi
+
+    return 1
+}
+
+output_json() {
+    path="$1"
+    line_number="$2"
+
+    if [ -n "$line_number" ]; then
+        body="$path:$line_number"
+        jq -n \
+            --arg path "$path" \
+            --arg body "$body" \
+            --argjson line "$line_number" \
+            '{
+                handled: true,
+                message: {
+                    title: "Opening File",
+                    body: $body
+                },
+                action: "open_file",
+                path: $path,
+                line_number: $line
+            }'
+        return
+    fi
+
+    body="$path"
+    jq -n \
+        --arg path "$path" \
+        --arg body "$body" \
+        '{
+            handled: true,
+            message: {
+                title: "Opening File",
+                body: $body
+            },
+            action: "open_file",
+            path: $path
+        }'
+}
+
+clipboard=$(cat)
+
+if ! result=$(extract_path_and_line "$clipboard"); then
+    # Not a file path, we can't handle this
+    exit 0
+fi
+
+path=$(echo "$result" | sed -n '1p')
+line_number=$(echo "$result" | sed -n '2p')
+
+output_json "$path" "$line_number"

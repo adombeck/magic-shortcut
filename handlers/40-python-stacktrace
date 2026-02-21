@@ -1,0 +1,37 @@
+#!/bin/sh
+# Handle Python stacktrace in clipboard
+
+# Read clipboard content from stdin
+clipboard=$(cat)
+
+# Python stacktrace pattern: File "path/to/file.py", line 123
+if ! echo "$clipboard" | grep -qE 'File "[^"]+", line [0-9]+'; then
+    # Not a Python stacktrace, exit without handling
+    exit 0
+fi
+
+result=$(echo "$clipboard" | sed -n 's/.*File "\([^"]*\)", line \([0-9]*\).*/\1|\2/p' | head -n 1)
+path="${result%%|*}"
+line_number="${result##*|}"
+
+if [ ! -f "$path" ]; then
+    # The extracted path does not exist as a file, exit without handling
+    exit 0
+fi
+
+body="$path:$line_number"
+
+jq -n \
+    --arg path "$path" \
+    --arg body "$body" \
+    --argjson line "$line_number" \
+    '{
+        handled: true,
+        message: {
+            title: "Opening Python Stacktrace",
+            body: $body
+        },
+        action: "open_file",
+        path: $path,
+        line_number: $line
+    }'

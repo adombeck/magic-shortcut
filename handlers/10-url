@@ -1,0 +1,25 @@
+#!/bin/sh
+# Handle URLs in clipboard
+
+# Read clipboard content from stdin
+clipboard=$(cat)
+
+# Check if clipboard content is a URL
+case "$clipboard" in
+    http://*|https://*)
+        # Return JSON indicating the URL should be opened
+        jq -n \
+            --arg url "$clipboard" \
+            '{
+                handled: true,
+                message: {
+                    title: "Opening URL",
+                    body: $url
+                },
+                action: "open_url",
+                url: $url
+            }'
+		EOF
+        exit 0
+        ;;
+esac

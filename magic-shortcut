@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+gi.require_version('Notify', '0.7')
+from gi.repository import Notify
+
+logger = logging.getLogger("magic-shortcut")
+
+# This file is shared by all the scripts I use which display notifications,
+# so that they replace each other's notifications.
+NOTIFICATION_ID_FILE = Path(f"/run/user/{os.getuid()}/notification-id")
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+HANDLERS_DIR = CONFIG_DIR / "magic-shortcut" / "handlers"
+
+PROJECTS_DIR = Path("~/projects").expanduser()
+
+if not PROJECTS_DIR.exists():
+    print(f"Warning: Projects directory {PROJECTS_DIR} does not exist", file=sys.stderr)
+
+# Add $HOME/.local/bin to the PATH
+os.environ['PATH'] = f"{os.environ['PATH']}:{Path.home()}/.local/bin"
+
+EDITOR = None
+
+class Editor:
+    def open(self, path, line_number=None):
+        raise NotImplementedError
+
+
+class IntelliJ(Editor):
+    def open(self, path, project_dir=None, line_number=None):
+        command = ["idea"]
+        real_path = Path(path)
+
+        if not real_path.exists():
+            notify("File not found", str(path))
+            return
+
+        if project_dir:
+            command += [str(project_dir)]
+
+        if line_number:
+            command += ['--line', str(line_number)]
+
+        command += [str(real_path)]
+
+        notify("Opening file in IntelliJ", str(real_path))
+        logger.info(f"Command: {' '.join(command)}")
+        subprocess.run(command)
+
+
+class VSCode(Editor):
+    def __init__(self):
+        self.command = ["code"]
+        self.name = "VS Code"
+
+    def open(self, path, line_number=None):
+        real_path = Path(path)
+
+        if not real_path.exists():
+            notify("File not found", str(path))
+            return
+
+        if line_number:
+            command = self.command + ['--goto', f"{real_path}:{line_number}"]
+        else:
+            command = self.command + [str(real_path)]
+        notify(f"Opening file in {self.name}", str(real_path))
+        logger.info(f"Command: {' '.join(command)}")
+        subprocess.run(command)
+
+
+class Cursor(VSCode):
+    def __init__(self):
+        super().__init__()
+        self.command = ["cursor"]
+        self.name = "Cursor"
+
+
+def notify(title, body):
+    logger.info(f"{title}: {body}")
+
+    if NOTIFICATION_ID_FILE.exists():
+        id_ = int(NOTIFICATION_ID_FILE.read_text().strip())
+    else:
+        id_ = 0
+
+    notification = Notify.Notification(
+        summary=title,
+        body=body,
+        id=id_,
+    )
+    try:
+        notification.show()
+    except gi.repository.GLib.Error as e:
+        if "Invalid notification ID" in str(e):
+            # Delete the notification file and try again
+            NOTIFICATION_ID_FILE.unlink()
+            notify(title, body)
+            return
+        raise
+
+    Path(NOTIFICATION_ID_FILE).write_text(str(notification.props.id))
+
+
+def try_open_in_project(path, project_dir, line_number=None):
+    """Try to open a file in a specific project directory."""
+    # Try path directly under project directory
+    absolute_path = project_dir / path
+    if absolute_path.exists():
+        logger.info(f"Opening {absolute_path}")
+        EDITOR.open(absolute_path, project_dir=project_dir, line_number=line_number)
+        return True
+
+    # If the path starts with the project directory name, remove that part
+    if path.parts and path.parts[0] == project_dir.name:
+        absolute_path = project_dir / Path(*path.parts[1:])
+        if absolute_path.exists():
+            logger.info(f"Opening {absolute_path}")
+            EDITOR.open(absolute_path, project_dir=project_dir, line_number=line_number)
+            return True
+
+    return False
+
+
+def find_and_open_in_projects(path, line_number=None):
+    """Search for a relative path in project directories and open it."""
+    if not PROJECTS_DIR.exists():
+        return False
+
+    # Get list of project dirs sorted by modification time, most recent first
+    project_dirs = sorted(
+        PROJECTS_DIR.iterdir(),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
+    for project_dir in project_dirs:
+        if try_open_in_project(path, project_dir, line_number):
+            return True
+
+    return False
+
+
+def handle_file_open(path, line_number=None):
+    """Handle opening a file path, checking if it exists or is relative to a project directory."""
+    path = Path(path)
+
+    # Try opening the path directly if it exists
+    if path.exists():
+        logger.info(f"Opening {path}")
+        EDITOR.open(path, line_number=line_number)
+        return True
+
+    # If the path is relative, search for it in project directories
+    if not path.is_absolute():
+        if find_and_open_in_projects(path, line_number):
+            return True
+
+    notify("File not found", str(path))
+    return False
+
+
+def handle_handler_response(handler, response) -> bool:
+    """Process a handler's JSON response and execute the requested action."""
+    # Show notification if message is provided
+    logger.debug(f"Handler {handler} response: {response}")
+    message = response.get('message')
+    if message:
+        notify(message['title'], message['body'])
+    else:
+        logger.info(f"Handler {handler} did not provide a message in the response")
+
+    action = response.get('action')
+
+    if not action:
+        # If no action is specified, consider the content handled
+        return True
+
+    if action == 'open_url':
+        url = response.get('url')
+        if not url:
+            notify(f"Handler {handler.name} error", "Missing URL for open_url action")
+            sys.exit(1)
+
+        # If the default browser is Firefox, use --new-window
+        default_browser = subprocess.check_output(
+            ["xdg-settings", "get", "default-web-browser"],
+            text=True
+        ).strip()
+
+        if default_browser.startswith("firefox"):
+            subprocess.run(["firefox", "--new-window", url])
+        else:
+            subprocess.run(["xdg-open", url])
+        return True
+
+    elif action == 'open_file':
+        path = response.get('path')
+        if not path:
+            notify(f"Handler {handler.name} error", "Missing path for open_file action")
+            sys.exit(1)
+
+        line_number = response.get('line_number')
+        return handle_file_open(path, line_number)
+
+    else:
+        notify(f"Handler {handler.name} error", f"Unknown action: {action}")
+        sys.exit(1)
+
+
+def run_handler(handler, clipboard_content) -> bool:
+    """Run a single handler and return whether it handled the content."""
+    logger.debug(f"Running handler {handler}")
+
+    result = subprocess.run(
+        [str(handler)],
+        input=clipboard_content,
+        stdout=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        notify(f"Handler {handler.name} failed", f"Exit code: {result.returncode}\n")
+        sys.exit(result.returncode)
+
+    if not result.stdout:
+        logger.debug(f"Handler did not produce any output, considering it as not handled")
+        return False
+
+    response = json.loads(result.stdout)
+    return handle_handler_response(handler, response)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="""Do something useful with the clipboard content."""
+    )
+    parser.add_argument(
+        '--editor',
+        choices=['intellij', 'vscode', 'cursor'],
+        default='intellij',
+        help='Editor to use for opening files (default: intellij)'
+    )
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+    )
+    return parser.parse_args()
+
+
+def main():
+    Notify.init("magic-shortcut")
+
+    args = parse_args()
+
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+    global EDITOR
+    if args.editor == 'cursor':
+        EDITOR = Cursor()
+    elif args.editor == 'vscode':
+        EDITOR = VSCode()
+    else:
+        EDITOR = IntelliJ()
+
+    # Get the clipboard content via wl-clipboard (this assumes Wayland)
+    clipboard_content = subprocess.run(
+        ["wl-paste"],
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+    if not clipboard_content:
+        notify("Clipboard is empty", "Nothing to do")
+        return
+
+    if not HANDLERS_DIR.exists():
+        notify("No handlers found", f"Directory {HANDLERS_DIR} does not exist")
+        return
+
+    # Sort handlers by name to ensure consistent execution order
+    handlers = sorted(HANDLERS_DIR.iterdir())
+    for handler in handlers:
+        try:
+            handled = run_handler(handler, clipboard_content)
+            if handled:
+                logger.info(f"Handler {handler} handled the clipboard content")
+                return
+        except Exception as e:
+            notify(f"Handler {handler.name} error", str(e))
+            raise e
+
+    # If no handler handled the clipboard content, show a notification
+    notify("Clipboard content not recognized", clipboard_content)
+
+
+if __name__ == '__main__':
+    main()
