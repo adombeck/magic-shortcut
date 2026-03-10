@@ -1,6 +1,45 @@
 #!/bin/sh
 # Handle file paths in clipboard (with optional line numbers)
 
+PROJECTS_DIR="$HOME/projects"
+
+if [ ! -d "$PROJECTS_DIR" ]; then
+    echo >&2 "Warning: Projects directory '$PROJECTS_DIR' does not exist."
+fi
+
+find_in_projects() {
+    # Check if the given relative path exists in the projects directory
+    relative_path="$1"
+
+    for project in "$PROJECTS_DIR"/*; do
+        if [ -d "$project" ]; then
+            potential_path="$project/$relative_path"
+            if [ -f "$potential_path" ]; then
+                echo "$potential_path"
+                return
+            fi
+        fi
+    done
+
+    return
+}
+
+find_file() {
+    # Check if the given path exists as an absolute path
+    if [ -f "$1" ]; then
+        echo "$1"
+        return
+    fi
+
+    # If the path is absolute, there's no need to check in projects
+    if [ "${1#/}" != "$1" ]; then
+        return
+    fi
+
+    # Try to find it in the projects directory
+    find_in_projects "$1"
+}
+
 is_valid_number() {
     echo "$1" | grep -qE '^[0-9]+$'
 }
@@ -12,12 +51,18 @@ parse_colon_format() {
     rest="${text#*:}"
     rest="${rest%%:*}"  # Remove trailing colon if present
 
-    if ! [ -f "$potential_path" ]; then
+    if [ "$potential_path" = "$text" ]; then
+        # Not in "path:line" format
+        return 1
+    fi
+
+    found_path=$(find_file "$potential_path")
+    if [ -z "$found_path" ]; then
         return 1
     fi
 
     if [ -n "$rest" ] && is_valid_number "$rest"; then
-        echo "$potential_path"
+        echo "$found_path"
         echo "$rest"
         return 0
     fi
@@ -31,12 +76,18 @@ parse_github_format() {
     potential_path="${text%%#L*}"
     rest="${text#*#L}"
 
-    if ! [ -f "$potential_path" ]; then
+    if [ "$potential_path" = "$text" ]; then
+        # Not in "path#Lline" format
+        return 1
+    fi
+
+    found_path=$(find_file "$potential_path")
+    if [ -z "$found_path" ]; then
         return 1
     fi
 
     if [ -n "$rest" ] && is_valid_number "$rest"; then
-        echo "$potential_path"
+        echo "$found_path"
         echo "$rest"
         return 0
     fi
@@ -47,11 +98,10 @@ parse_github_format() {
 extract_path_and_line() {
     text="$1"
 
-    # Check if it's an existing file
-    if [ -e "$text" ]; then
-        echo "$text"
-        echo ""
-        return
+    found_path=$(find_file "$text")
+    if [ -n "$found_path" ]; then
+        echo "$found_path"
+        return 0
     fi
 
     # Try colon format
